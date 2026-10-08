@@ -1,0 +1,4 @@
+[submodule "externals/mesa"]
+	path = externals/mesa
+	url = https://gitlab.freedesktop.org/mesa/mesa.git
+	shallow = true
