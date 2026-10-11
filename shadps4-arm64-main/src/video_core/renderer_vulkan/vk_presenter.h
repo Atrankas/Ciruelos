@@ -236,6 +236,10 @@ private:
     /// the next frame is drawn is what keeps the handover off the thread that presents.
     Frame* pending_flat{};
     FlatPicture pending_flat_picture{};
+    /// The picture drawn for the frame being prepared now: it becomes `pending_flat` at the end
+    /// of this frame, once the one before it has been handed over (TakeFlatFrame).
+    Frame* next_flat{};
+    FlatPicture next_flat_picture{};
     /// Whether the one line that says a flat picture is on its way to the host has been written.
     bool flat_announced{false};
 };

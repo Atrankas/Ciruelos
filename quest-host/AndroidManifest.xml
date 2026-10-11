@@ -38,11 +38,20 @@
     <uses-permission android:name="org.khronos.openxr.permission.OPENXR_SYSTEM" />
     <!-- Lets the app see a paired DualSense's rumble motors. -->
     <uses-permission android:name="android.permission.VIBRATE" />
+	<uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
     <!--
       The game listens to the headset's microphone (blowing at things in its world), as it did
       to PlayStation VR's. Asked for when the app starts; without it the game hears silence.
     -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!--
+      The games are put in Download/Games on the headset's shared storage (it is reached by adb
+      and by the file transfer, and survives uninstalling the app). Reading that folder needs
+      this, granted once from a computer:
+        adb shell appops set com.astrobotquest.vrhost MANAGE_EXTERNAL_STORAGE allow
+      Without it the app still finds games in its own folder and in /data/local/tmp/astro/games.
+    -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
     <!-- Development aid, see SandboxShell.java. -->
     <instrumentation

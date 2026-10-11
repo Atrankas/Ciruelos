@@ -117,6 +117,10 @@ bool VrExporter::IsLocal(const Frame* frame) const {
                                [&](const auto& local) { return local.get() == frame; });
 }
 
+bool VrExporter::MayDeliver() const {
+    return !failed && Core::Vr::HostLink::Instance().IsConnected();
+}
+
 Frame* VrExporter::Acquire(vk::Format format) {
     if (failed || !Core::Vr::HostLink::Instance().IsConnected()) {
         return nullptr;

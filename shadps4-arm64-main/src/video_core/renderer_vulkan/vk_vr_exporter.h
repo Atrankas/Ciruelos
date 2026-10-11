@@ -67,6 +67,12 @@ public:
         return !failed && !slots.empty();
     }
 
+    /// Whether a title that never draws for the headset may be the one that sets the buffers up.
+    /// Setup runs on the first Acquire, so CanDeliver alone would keep such a title off the host
+    /// for ever (nothing else would ever call Acquire): the host is there, and nothing has gone
+    /// wrong with it.
+    bool MayDeliver() const;
+
 private:
     struct Slot;
 

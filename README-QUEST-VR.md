@@ -230,17 +230,33 @@ out of `bachatas4-0.2.4-release.apk`, which therefore has to stay in this folder
 
 ```sh
 adb install -r build/quest/astro-vr-host.apk
-adb push games/CUSA12392 /data/local/tmp/astro/games/        # 13 GB, a few minutes
+adb shell appops set com.astrobotquest.vrhost MANAGE_EXTERNAL_STORAGE allow   # once
+adb push games/CUSA12392 /sdcard/Download/Games/             # 13 GB, a few minutes
 ```
+
+Games go in `Download/Games` on the headset's shared storage (`/sdcard/Download/Games/SERIAL/`,
+with `eboot.bin` in the game's folder). `adb push` and the file transfer both reach it, and it is
+not deleted when the app is uninstalled. Reading it needs the app to be let see all files: the
+`appops` line above grants that once (without it the app still finds games in its own folder and
+in `/data/local/tmp/astro/games/`, which keep working). A folder written `Downloads/Games` is
+looked in too, if it exists.
 
 To play with a gamepad, pair it with the headset (Settings ▸ Bluetooth; on a DualSense, hold
 Create + PS until the light bar flashes); the headset's own controllers need nothing. Then start
 **Astro VR Host** from the app library (Unknown Sources). A floating panel reports what the app
 is doing, and what the game will be played with, until the game's first frame arrives.
-With more than one game installed (`games/`, one folder each, or `/data/local/tmp/astro/games/`),
-that panel first lists them, by their title and serial, for the player to choose from: up / down
-on the left stick or the D-pad, A / cross or a trigger to start. The choice is remembered; `game=`
-and `ask_game=1` in `vrhost.txt` (below) say which game, or that the picker is to be shown again.
+With more than one game installed (`Download/Games`, `games/`, one folder each, or
+`/data/local/tmp/astro/games/`), that panel first lists them, by their title and serial, for the
+player to choose from every time the app starts: up / down on the left stick or the D-pad, A /
+cross or a trigger to start. `game=` and `ask_game=0` in `vrhost.txt` (below) say which game to
+start without asking, or that the one picked last time is started.
+A title that does not use the headset (a game made for a television) is shown on a floating
+screen, flat or curved, instead of in the headset. With a gamepad, **hold L1 + R1** to arrange it
+(the game gets nothing meanwhile, and a panel shows the values): D-pad up / down moves it away /
+closer, D-pad right / left makes it wider / narrower, Triangle / Cross bends it more / less,
+Square brings it in front of where you look now, Circle puts it back as it started. What is set
+is kept for each game. A display refresh of 120 Hz (`refresh_rate=120`) suits a game that runs
+at 60 frames a second.
 With a gamepad, put the Touch controllers aside: with them out of the way the headset tracks
 your hands, which is what places the gamepad in the game. See "Controllers" below for what
 plays how.
@@ -290,12 +306,13 @@ Optional settings go in `/sdcard/Android/data/com.astrobotquest.vrhost/files/vrh
 | `stats=1` | keep a small panel in view with the game's frame rate, the display's refresh rate and whether the hands holding the controller are seen |
 | `screen=0` | do not show a flat picture on a screen in front of the player. A title that never asks for the emulated headset (one made for a television) delivers one ordinary picture instead of an eye in each half; by default it is shown on a screen of its own, which stays where it was put so that it can be looked around. With `0` the status panel is all there is to see of that title |
 | `screen_distance=2.5` | how far in front of the player that screen is put, in metres (0.8–8) |
-| `screen_width=2.2` | how wide it is, in metres (0.5–12); its height follows from the shape of the picture the title draws |
+| `screen_curve=0.3` | how much the screen wraps round the player: 0 is flat, 1 a cylinder with the player in its middle (0.05–1 is drawn as a piece of a cylinder, which needs `XR_KHR_composition_layer_cylinder`; without it the screen is flat) |
+| `screen_width=2.2` | how wide it is, in metres (0.5–12), measured along the surface; its height follows from the shape of the picture the title draws. These three are where a game's screen starts: what the player sets with the pad (below) is remembered for each game and wins over them |
 | `predict_ms=25` | how far beyond the next refresh the head pose given to the game is predicted (0–80). More if the picture's edges show when turning the head, less if the world wobbles |
 | `dynamic_resolution=0` | do not ask the system what size it recommends for the picture (which may cost the GPU its fastest clock). `2`: also show the picture at that size, as up to version 0.6. Default: ask, and show the picture at full size, see "The picture" |
 | `cpu_boost=0` | do not ask for the processor's "boost" level (its fastest clock, which the system grants for the first 45 seconds and up to a fifth of the time after) |
-| `game=CUSA12392` | the game to start without asking for it: a serial (`CUSA12392`), the name of its folder under `games/`, its title, or the path of that folder or of its `eboot.bin`. Default: the game picked in the headset last time; with no such choice, the only game there is (so one game starts as it always did). With several games and nothing that says which, the app offers them to choose from in the headset |
-| `ask_game=1` | show that picker in the headset even though a game was picked before, so that another one can be. Up / down on the left stick or the D-pad moves the highlight, A / cross or a trigger starts the game it is on. Default 0 |
+| `game=CUSA12392` | the game to start without asking for it: a serial (`CUSA12392`), the name of its folder, its title, or the path of that folder or of its `eboot.bin`. Default: the only game there is (so one game starts as it always did); with several, the app offers them to choose from in the headset |
+| `ask_game=0` | do not show that picker: start the game picked last time, if it is still there. By default the picker is shown whenever there is more than one game (`1` shows it even for a single game). Up / down on the left stick or the D-pad moves the highlight, A / cross or a trigger starts the game it is on |
 | `fov=100` | Initial choice in the startup FOV menu, from 50–100% of the user's headset projection tangents. The last menu choice is used when this setting is absent; the first-launch default is 85. `100` fills the runtime-reported headset FOV and adds no mask. Lower values render the same pixels over fewer degrees, with a soft squircle border around each eye. The menu's angles and average PPD gain are calculated from this headset's detected optics; the chosen FOV is logged in host.log and core.log. |
 | `mic=0` | the game does not get to hear the headset's microphone (see "Microphone") |
 | `mic_gain=2` | make what the game hears that many times louder (0.1–30) |

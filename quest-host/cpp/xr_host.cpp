@@ -171,6 +171,8 @@ private:
         has_swapchain_state =
             options.cubic && enable_if_present(XR_FB_SWAPCHAIN_UPDATE_STATE_EXTENSION_NAME) &&
             enable_if_present(XR_FB_SWAPCHAIN_UPDATE_STATE_OPENGL_ES_EXTENSION_NAME);
+        // A curved screen is a cylinder layer; without the extension the screen is flat.
+        has_cylinder = enable_if_present(XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME);
         has_hand_tracking =
             options.track_hands && enable_if_present(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
         has_layer_resolution =
@@ -1225,6 +1227,7 @@ private:
             XrCompositionLayerSettingsFB layer_settings{XR_TYPE_COMPOSITION_LAYER_SETTINGS_FB};
             XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
             XrCompositionLayerQuad screen_quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+            XrCompositionLayerCylinderKHR screen_cylinder{XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR};
             std::vector<const XrCompositionLayerBaseHeader*> layers;
 
             if (frame_state.shouldRender == XR_TRUE) {
@@ -1246,6 +1249,15 @@ private:
                         LOGI("the title is drawing for the headset: showing the eyes");
                     }
                     screen_shown = on_screen;
+                    host_status.screen_shown = on_screen;
+                }
+                // The player asks for the screen to be put in front of them again.
+                const uint32_t place_requests = host_status.screen_place_requests.load();
+                if (place_requests != screen_requests_seen) {
+                    screen_requests_seen = place_requests;
+                    if (on_screen) {
+                        PlaceScreen(frame_state.predictedDisplayTime);
+                    }
                 }
 
                 if (shown_frame && !flat) {
@@ -1265,9 +1277,7 @@ private:
                     layers.push_back(
                         reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection));
                 } else if (on_screen) {
-                    FillFlatQuad(*shown_frame, screen_quad);
-                    layers.push_back(
-                        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&screen_quad));
+                    layers.push_back(FillFlatScreen(*shown_frame, screen_quad, screen_cylinder));
                 }
                 const bool card = host_status.show_panel;
                 if ((stale || options.show_stats || card) && status_ready) {
@@ -1806,16 +1816,27 @@ private:
             // Nobody can say where the head is: straight ahead of where the player sits.
             LOGE("the head is not tracked: the screen goes straight ahead of the seat");
         }
-        screen_pose.orientation = {0.0f, std::sin(yaw * 0.5f), 0.0f, std::cos(yaw * 0.5f)};
-        screen_pose.position = {at.x - std::sin(yaw) * options.screen_distance,
-                                at.y - ScreenDrop,
-                                at.z - std::cos(yaw) * options.screen_distance};
+        // Where the screen is follows from this and from the distance, the width and the curve
+        // as the player has them at every frame: they change while it is being arranged.
+        screen_anchor = at;
+        screen_yaw = yaw;
     }
 
     /// Describes the flat picture to the compositor: an opaque screen where PlaceScreen left
     /// it, showing the part of the image the picture itself occupies. The rest of the buffer
     /// is the black it is letterboxed with, and none of that is shown here.
-    void FillFlatQuad(const Protocol::Frame& frame, XrCompositionLayerQuad& quad) const {
+    ///
+    /// With a curve the screen is a piece of a cylinder, and a flat one otherwise (or where
+    /// the runtime has no cylinders). Either way the middle of the screen is `distance` metres
+    /// ahead of where the player stood when it was put, its width is `width` metres measured
+    /// along the surface and its height follows from the shape of the picture: it is never
+    /// stretched. A curve of 1 puts the player in the middle of the cylinder (the screen is
+    /// then the same distance from the eyes all the way across); less is a larger cylinder,
+    /// a gentler bend.
+    const XrCompositionLayerBaseHeader* FillFlatScreen(const Protocol::Frame& frame,
+                                                       XrCompositionLayerQuad& quad,
+                                                       XrCompositionLayerCylinderKHR& cylinder)
+        const {
         // The frame is copied to the lower left corner of the image at the size it is shown
         // at, which is smaller than the buffer where the image had to be clamped to what the
         // runtime allows, or where the system recommended a smaller picture: the picture
@@ -1824,22 +1845,68 @@ private:
         const uint32_t buffer_height = std::max(frame_buffer_height, 1u);
         const float across = static_cast<float>(shown_width) / static_cast<float>(buffer_width);
         const float down = static_cast<float>(shown_height) / static_cast<float>(buffer_height);
-        // No blend flag: an ordinary picture has nothing transparent about it.
-        quad.space = local_space;
-        quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-        quad.subImage.swapchain = game_swapchain.handle;
-        quad.subImage.imageRect.offset = {
+        const XrOffset2Di offset{
             static_cast<int32_t>(static_cast<float>(frame.content_x) * across),
             static_cast<int32_t>(static_cast<float>(frame.content_y) * down)};
-        quad.subImage.imageRect.extent = {
+        const XrExtent2Di extent{
             static_cast<int32_t>(static_cast<float>(frame.content_width) * across),
             static_cast<int32_t>(static_cast<float>(frame.content_height) * down)};
         // Its height follows from the picture's own shape, so that it is not stretched. The
         // caller only comes here for a picture that has one.
         const float aspect = static_cast<float>(frame.content_width) /
                              static_cast<float>(frame.content_height);
-        quad.pose = screen_pose;
-        quad.size = {options.screen_width, options.screen_width / aspect};
+
+        const float distance = host_status.screen_distance.load();
+        const float width = host_status.screen_width.load();
+        const float curve = std::clamp(host_status.screen_curve.load(), 0.0f, 1.0f);
+        // Straight ahead of the player, level: the way they faced when the screen was put.
+        const float ahead_x = -std::sin(screen_yaw);
+        const float ahead_z = -std::cos(screen_yaw);
+        const XrQuaternionf facing{0.0f, std::sin(screen_yaw * 0.5f), 0.0f,
+                                   std::cos(screen_yaw * 0.5f)};
+        const XrVector3f middle{screen_anchor.x + ahead_x * distance,
+                                screen_anchor.y - ScreenDrop,
+                                screen_anchor.z + ahead_z * distance};
+
+        // No blend flag: an ordinary picture has nothing transparent about it.
+        constexpr float MinCurve = 0.05f;
+        if (has_cylinder && curve >= MinCurve) {
+            // The cylinder is as many times larger than the distance as the curve is small.
+            const float radius = distance / curve;
+            constexpr float MaxAngle = 6.0f; // radians, a little short of all the way round
+            const float angle = std::min(width / radius, MaxAngle);
+            // The width actually shown (the angle may have been held back), so that the
+            // height stays what the picture's shape says it should be.
+            const float shown_arc = radius * angle;
+            const float height = width / aspect;
+            cylinder.layerFlags = 0;
+            cylinder.space = local_space;
+            cylinder.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+            cylinder.subImage.swapchain = game_swapchain.handle;
+            cylinder.subImage.imageRect.offset = offset;
+            cylinder.subImage.imageRect.extent = extent;
+            cylinder.subImage.imageArrayIndex = 0;
+            // The pose is the middle of the cylinder, and the part that is seen lies along
+            // its -Z axis: the middle of the screen, seen from `radius` metres behind it.
+            cylinder.pose.orientation = facing;
+            cylinder.pose.position = {middle.x - ahead_x * radius, middle.y,
+                                      middle.z - ahead_z * radius};
+            cylinder.radius = radius;
+            cylinder.centralAngle = angle;
+            cylinder.aspectRatio = shown_arc / height;
+            return reinterpret_cast<const XrCompositionLayerBaseHeader*>(&cylinder);
+        }
+        quad.layerFlags = 0;
+        quad.space = local_space;
+        quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+        quad.subImage.swapchain = game_swapchain.handle;
+        quad.subImage.imageRect.offset = offset;
+        quad.subImage.imageRect.extent = extent;
+        quad.subImage.imageArrayIndex = 0;
+        quad.pose.orientation = facing;
+        quad.pose.position = middle;
+        quad.size = {width, width / aspect};
+        return reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
     }
 
     void Shutdown() {
@@ -1906,6 +1973,7 @@ private:
     bool has_thread_settings{};
     bool has_layer_settings{};
     bool has_auto_filter{};
+    bool has_cylinder{};
     bool has_hand_tracking{};
     bool has_layer_resolution{};
     bool has_metrics{};
@@ -2000,7 +2068,10 @@ private:
 
     /// The screen a flat picture is shown on, where it was put when one first appeared, and
     /// whether the compositor was last given that picture: both change together.
-    XrPosef screen_pose{{0.0f, 0.0f, 0.0f, 1.0f}, {}};
+    /// Where the player stood and which way they faced when it was put (see PlaceScreen).
+    XrVector3f screen_anchor{};
+    float screen_yaw{};
+    uint32_t screen_requests_seen{};
     bool screen_shown{};
     /// How far below the player's eyes the middle of that screen goes, in metres: a picture
     /// looked at slightly from above reads better than one at eye level.

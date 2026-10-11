@@ -19,15 +19,15 @@
 # owner plays with the other one (the tools take ASTRO_PACKAGE for which of the two they run).
 set -euo pipefail
 
-root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+root="/c/ps4emu"
 host="$root/quest-host"
 out="$root/build/quest"
 
-NDK=${ANDROID_NDK:-"/c/Program Files/Unity/Hub/Editor/6000.3.2f1/Editor/Data/PlaybackEngines/AndroidPlayer/NDK"}
-SDK=${ANDROID_SDK:-"$LOCALAPPDATA/Android/Sdk"}
+NDK=${ANDROID_NDK:-"/c/ps4emu/tools/android-ndk"}
+SDK=${ANDROID_SDK:-"/c/ps4emu/tools/android-sdk"}
 BUILD_TOOLS="$SDK/build-tools/36.1.0"
 PLATFORM_JAR="$SDK/platforms/android-36/android.jar"
-JDK=${JAVA_HOME:-"/c/Program Files/Android/Android Studio/jbr"}
+JDK=${JAVA_HOME:-"/c/ps4emu/tools/jdk"}
 # Python: $PYTHON, or the one named in tools/python.local (a full path), or the one on PATH.
 PYTHON=${PYTHON:-$(cat "$root/tools/python.local" 2>/dev/null || command -v python3 || command -v python)}
 BACHATA_APK="$root/bachatas4-0.2.4-release.apk"
@@ -73,7 +73,7 @@ mkdir -p "$out/runtime/drivers/turnip"
 unzip -q -o "$out/bachata/assets/drivers/$driver" -d "$out/runtime/drivers/turnip"
 [[ -f "$out/runtime/drivers/turnip/freedreno_icd.aarch64.json" ]] || {
   echo "$driver is not a glibc Turnip package (no ICD manifest)" >&2; exit 1; }
-"$root/tools/llvm/bin/llvm-strip.exe" -o "$out/runtime/host/shadps4-arm64-fex" "$CORE"
+"$root/tools/llvm/bin/llvm-strip.exe" -o "$(cygpath -m "$out/runtime/host/shadps4-arm64-fex")" "$(cygpath -m "$CORE")"
 # Translates the GPU memory calls Horizon OS denies to apps into the ones it allows. A glibc
 # library like the rest of the runtime, so it is built with the same cross compiler as the core.
 "$root/tools/llvm/bin/aarch64-linux-gnu-clang.exe" -O2 -fPIC -shared "$prefix_map" \

@@ -303,7 +303,7 @@ public class SandboxShell extends Instrumentation {
                 env.add(entry);
             }
         }
-        String game = arguments.getString("game", "/data/local/tmp/astro/games/CUSA12392/eboot.bin");
+        String game = arguments.getString("game", "");
         return installed + nativeSelfTest(
                 getTargetContext().getApplicationInfo().nativeLibraryDir + "/libastro_ld.so",
                 new File(files, "runtime").getAbsolutePath(), storage.getAbsolutePath(), game,

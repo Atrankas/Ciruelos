@@ -784,7 +784,22 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
         requests.pop();
         return request;
     };
-    const auto flip_hmd_frame = [this, &refresh_clock](const Request& request) {
+    
+    // Lambdas de ayuda para limitar la velocidad sincronizada con el refresco real del casco
+    const auto apply_frame_pacing_lock = [&vblank_period]() {
+        static auto last_flip_wall_time = std::chrono::steady_clock::now();
+        auto current_wall_time = std::chrono::steady_clock::now();
+        auto elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(current_wall_time - last_flip_wall_time);
+        
+        // Sincronización perfecta: si el frame va más rápido que el refresco del casco, duerme el tiempo restante
+        if (elapsed_ns < vblank_period) {
+            std::this_thread::sleep_for(vblank_period - elapsed_ns);
+        }
+        last_flip_wall_time = std::chrono::steady_clock::now();
+    };
+
+    const auto flip_hmd_frame = [this, &refresh_clock, &apply_frame_pacing_lock](const Request& request) {
+        apply_frame_pacing_lock(); // Freno en ruta HMD
         const auto now = std::chrono::steady_clock::now();
         Vulkan::FrameStats::Time(Vulkan::FrameStats::Stage::Queued, now - request.prepared);
         Flip(request);
@@ -854,14 +869,23 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
                              "BACHATA_FLIP_TRACE stage=queue_dequeue index={} arg={}", request.index,
                              request.flip_arg);
                 }
-                if (request.is_hmd || presenter->IsHostFrame(request.frame)) {
+                    if (request.is_hmd || presenter->IsHostFrame(request.frame)) {
                     const auto now = std::chrono::steady_clock::now();
                     Vulkan::FrameStats::Time(Vulkan::FrameStats::Stage::Queued,
                                              now - request.prepared);
                     refresh_clock.NoteDelivery(now, request.is_hmd ? pace : 2u);
                 }
+                
+                // === AUTOMATIZACIÓN HÍBRIDA DINÁMICA ===
+                // Solo aplicamos el freno de microsegundos en juegos de TV planos (como Sonic).
+                // Los títulos VR nativos (Astro Bot) se saltan el freno para ir a la velocidad del casco.
+                if (!request.is_hmd) {
+                    apply_frame_pacing_lock(); 
+                }
+
                 Flip(request);
                 FRAME_END;
+
             }
         }
 
@@ -883,6 +907,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
         timer.End();
     }
 }
+
 
 void VideoOutDriver::SignalVblank(VideoOutPort& port) {
     // Needs lock here as can be concurrently read by `sceVideoOutGetVblankStatus`

@@ -451,3 +451,5 @@ session-logs*
 
 # Isolated local agent worktrees
 .worktrees/
+
+!/externals/**

@@ -22,6 +22,7 @@ import android.hardware.lights.LightsRequest;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.CombinedVibration;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
@@ -57,7 +58,9 @@ import java.util.Locale;
  *
  * Files the user provides live in the app's external folder
  * (/sdcard/Android/data/com.astrobotquest.vrhost/files):
- *   games/SERIAL/eboot.bin ...   the extracted game (or /data/local/tmp/astro/games/SERIAL)
+ *   games/SERIAL/eboot.bin ...   the extracted game (or /data/local/tmp/astro/games/SERIAL, or
+ *                                 - where the games are put by default - Download/Games/SERIAL
+ *                                 on the headset's shared storage)
  *   data/shadPS4/                 the emulator's own folder (sys_modules, saves, logs)
  *   vrhost.txt                    optional settings, see readSettings
  * and what the app leaves there for looking at afterwards:
@@ -81,10 +84,33 @@ public class MainActivity extends Activity
     private static final int GAME_ROWS = 6;
 
     /** The game this app was built around: it leads the list, as it always did. */
-    private static final String PREFERRED_SERIAL = "CUSA12392";
+    private static final String PREFERRED_SERIAL = "";
 
-    /** Second place games are looked for; every app may read what adb puts there. */
-    private static final String SHELL_GAMES = "/data/local/tmp/astro/games";
+    /** Another place games are looked for; every app may read what adb puts there. */
+    private static final String SHELL_GAMES = "/data/local/tmp/astro/no_games";
+
+    /**
+     * Where games are put by default: Games in the headset's shared Download folder. adb and
+     * the file transfer reach it, it is not deleted with the app, and it needs the app to be
+     * let see all files (see storageAccess).
+     */
+    private static File downloadGames() {
+        return new File(Environment.getExternalStoragePublicDirectory(
+                Environment.DIRECTORY_DOWNLOADS), "Games");
+    }
+
+    /** Games folder written "Downloads/Games", which is easily done: looked in when it exists. */
+    private static File downloadsGames() {
+        return new File(Environment.getExternalStorageDirectory(), "Downloads/Games");
+    }
+
+    /** Whether the app may read files anywhere on the shared storage (Download/Games). */
+    private static boolean storageAccess() {
+        return Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager();
+    }
+
+    private static final String ALL_FILES_COMMAND =
+            "adb shell appops set com.astrobotquest.vrhost MANAGE_EXTERNAL_STORAGE allow";
 
     // Mirrors CoreProcess::State.
     private static final int CORE_IDLE = 0, CORE_STARTING = 1, CORE_RUNNING = 2, CORE_STOPPED = 3,
@@ -103,7 +129,16 @@ public class MainActivity extends Activity
             boolean trackHands, int sharpen, boolean cubic, boolean showStats, float predictMs,
             int dynamicResolution, boolean cpuBoost, boolean ownControllers, int padHand,
             float padTilt, boolean rumble, boolean stickTouchpad, boolean showScreen,
-            float screenDistance, float screenWidth);
+            float screenDistance, float screenWidth, float screenCurve);
+
+    /** The flat screen as the player has it now: metres ahead, metres wide, curve 0 to 1. */
+    private native void nativeSetScreen(float distance, float width, float curve);
+
+    /** Whether a flat picture (a game that does not use the headset) is on the screen. */
+    private native boolean nativeScreenShown();
+
+    /** Puts the screen in front of the player again, where they look now. */
+    private native void nativeScreenRecenter();
 
     private native boolean nativeStartCore(String loader, String runtimeRoot, String storageRoot,
             String game, String logFile, String[] extraArgs, String[] extraEnv);
@@ -231,19 +266,28 @@ public class MainActivity extends Activity
     private float predictMs = 25;
     /** Show a flat picture (a title that does not use the headset) on a screen of its own. */
     private boolean showScreen = true;
+    // The screen as it is now (the player changes it while playing, see adjustScreen); the
+    // first three are what vrhost.txt (or nothing) says, and what Circle brings back.
     private float screenDistance = 2.5f;
     private float screenWidth = 2.2f;
+    private float screenCurve = 0.3f;
+    private float[] screenDefaults = {2.5f, 2.2f, 0.3f};
+    private volatile boolean adjustingScreen;
+    private boolean screenChanged;
+    private long screenRecenteredAt;
+    private String screenSerial = "";
     private boolean microphone = true;
     private int dynamicResolution = 1;
     private boolean cpuBoost = true;
     /**
      * Which game to run: what `game=` names, or the one picked in the headset last time
-     * (remembered where the field of view is), and whether the picker is to be shown although
-     * one was picked before (`ask_game=1`).
+     * (remembered where the field of view is), and whether the picker is to be shown: by
+     * default it is, whenever there is more than one game (2); `ask_game=0` starts the one
+     * picked last time instead (0), `ask_game=1` shows the picker even for a single game (1).
      */
     private volatile String gameSetting = "";
     private volatile String lastGame = "";
-    private boolean askGame;
+    private int askGame = 2;
     /**
      * How much of the user's headset projection the game draws, in percent: less than all
      * of it for more pixels to the degree, which is what the player asked for.
@@ -300,6 +344,17 @@ public class MainActivity extends Activity
         super.onCreate(savedInstanceState);
         dryRun = getIntent() != null && getIntent().getBooleanExtra("dry_run", false);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+		
+		// SOLICITUD NATIVA DE ALMACENAMIENTO PARA DOWNLOAD/GAMES
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            if (!android.os.Environment.isExternalStorageManager()) {
+                android.content.Intent intent = new android.content.Intent(
+                    android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                    android.net.Uri.parse("package:" + getPackageName())
+                );
+                startActivity(intent);
+            }
+        }
 
         // Nothing is drawn here, the view only exists to receive controller events.
         inputView = new View(this);
@@ -326,10 +381,11 @@ public class MainActivity extends Activity
             lastGame = getPreferences(MODE_PRIVATE).getString("game", "");
         }
         readSettings();
+        screenDefaults = new float[] {screenDistance, screenWidth, screenCurve};
         choosingFov = !dryRun;
         nativeStartXr(refreshRate, 1440, 1536, trackHands, sharpen, cubic, showStats, predictMs,
                 dynamicResolution, cpuBoost, ownControllers, padHand, padTilt, rumble,
-                stickTouchpad, showScreen, screenDistance, screenWidth);
+                stickTouchpad, showScreen, screenDistance, screenWidth, screenCurve);
 
         InputManager inputManager = getSystemService(InputManager.class);
         inputManager.registerInputDeviceListener(this, handler);
@@ -348,6 +404,7 @@ public class MainActivity extends Activity
             startGame();
         } else {
             handler.post(this::pollOwnControllers);
+            handler.post(adjustTick);
         }
         handler.post(this::refreshStatus);
         handler.post(this::applyFeedback);
@@ -482,6 +539,10 @@ public class MainActivity extends Activity
      *                          With 0 the status panel is all there is to see of that title
      *   screen_distance=2.5    how far in front of the player that screen is put, in metres,
      *                          0.8 to 8
+     *   screen_curve=0.3       how much it wraps round the player, 0 (flat) to 1 (a cylinder
+     *                          round them). What the player sets in the headset (L1 + R1,
+     *                          see adjustScreen) is remembered for each game and wins over
+     *                          these three, which are where it starts from
      *   screen_width=2.2       how wide it is, in metres, 0.5 to 12. Its height follows from
      *                          the shape of the picture the title draws
      *   predict_ms=25          how far beyond the next refresh the head pose given to the game
@@ -497,13 +558,13 @@ public class MainActivity extends Activity
      *                          otherwise grants for the first 45 seconds and now and then
      *   game=CUSA12392         the game to start without asking: a serial, the name of its
      *                          folder under games/, its title, or the path of that folder or
-     *                          of its eboot.bin. Without this the game picked in the headset
-     *                          last time is started; with no such choice, one game only, that
-     *                          one. With several games and nothing that says which, the app
-     *                          offers them to choose from in the headset: up and down on the
-     *                          left stick or the D-pad, A / cross or a trigger to start
-     *   ask_game=1             show the game picker even though one was picked before, so
-     *                          that another one can be
+     *                          of its eboot.bin. Without this, one game only starts as it is;
+     *                          with several the app offers them to choose from in the headset
+     *                          (up and down on the left stick or the D-pad, A / cross or a
+     *                          trigger to start), unless ask_game=0
+     *   ask_game=0             do not show the game picker: start the game picked last time
+     *                          (the default is to show it whenever there is more than one
+     *                          game; 1 shows it even for a single game)
      *   fov=100                have the game draw that many percent of this headset's full
      *                          projection: 100 fills its field of view. Showing the same
      *                          pixels over fewer degrees is a sharper
@@ -615,6 +676,9 @@ public class MainActivity extends Activity
                     case "screen_width":
                         screenWidth = Math.max(0.5f, Math.min(12.0f, Float.parseFloat(value)));
                         break;
+                    case "screen_curve":
+                        screenCurve = Math.max(0.0f, Math.min(1.0f, Float.parseFloat(value)));
+                        break;
                     case "predict_ms":
                         predictMs = Math.max(0, Math.min(80, Float.parseFloat(value)));
                         break;
@@ -633,7 +697,7 @@ public class MainActivity extends Activity
                                 ? value.substring(0, value.length() - 1) : value;
                         break;
                     case "ask_game":
-                        askGame = !value.equals("0");
+                        askGame = value.equals("0") ? 0 : 1;
                         break;
                     case "fov":
                         fieldOfView = Math.max(FOV_MIN, Math.min(FOV_MAX, Integer.parseInt(value)));
@@ -703,6 +767,16 @@ public class MainActivity extends Activity
             File external = getExternalFilesDir(null);
             File gamesDir = new File(external, "games");
             gamesDir.mkdirs();
+            // Where games go by default. Made when the app may (it may not, until it is let see
+            // all files: the folder is then made by whoever copies the first game there).
+            File downloads = downloadGames();
+            boolean allFiles = storageAccess();
+            if (allFiles) {
+                downloads.mkdirs();
+            } else {
+                logWarning("the app may not read the shared storage, so " + downloads
+                        + " is not looked in: " + ALL_FILES_COMMAND, null);
+            }
             new File(external, "data/shadPS4/sys_modules").mkdirs();
 
             // What there is to play, in both folders, and which of it this start is to use.
@@ -710,8 +784,12 @@ public class MainActivity extends Activity
             if (found.isEmpty()) {
                 setupFailed = true;
                 setupStatus = "No game found.\n\nCopy the extracted game folder (the one that "
-                        + "contains eboot.bin) to the headset, to either of\n" + gamesDir
-                        + "\n" + SHELL_GAMES + "\nthen start this app again.";
+                        + "contains eboot.bin) to the headset, to\n" + downloads
+                        + "\n(or to " + gamesDir + ")\nthen start this app again."
+                        + (allFiles ? ""
+                                : "\n\nThe app is not allowed to read the shared storage, "
+                                + "where the first folder is. From a computer, once:\n"
+                                + ALL_FILES_COMMAND);
                 return;
             }
             Game chosen = null;
@@ -722,11 +800,11 @@ public class MainActivity extends Activity
                     logWarning("game=" + gameSetting + " is not a game on the headset", null);
                 }
             }
-            if (chosen == null && !askGame && !lastGame.isEmpty()) {
+            if (chosen == null && askGame == 0 && !lastGame.isEmpty()) {
                 // What was picked in the headset last time, if it is still there.
                 chosen = named(found, lastGame);
             }
-            if (chosen == null && !askGame && found.size() == 1) {
+            if (chosen == null && askGame != 1 && found.size() == 1) {
                 // One game: there is nothing to choose, as before there was a picker.
                 chosen = found.get(0);
             }
@@ -757,6 +835,7 @@ public class MainActivity extends Activity
                 }
             }
             File eboot = chosen.eboot;
+            loadScreenProfile(chosen.serial);
 
             File storage = new File(getFilesDir(), "core");
             storage.mkdirs();
@@ -873,14 +952,14 @@ public class MainActivity extends Activity
     }
 
     /**
-     * Every game the headset has: what is in the app's own folder first, then what is in the
-     * one adb can write to. The same game in both is one game, and a game beside the folder
+     * Every game the headset has: what is in Download/Games first, then in the app's own
+     * folder, then what is in the one adb can write to. The same game in both is one game, and a game beside the folder
      * its update is unpacked into (the two say the same serial) is one game as well.
      */
     private List<Game> findGames() {
         List<Game> found = new ArrayList<>();
-        for (File folder : new File[] {new File(getExternalFilesDir(null), "games"),
-                new File(SHELL_GAMES)}) {
+        for (File folder : new File[] {downloadGames(), downloadsGames(),
+                new File(getExternalFilesDir(null), "games"), new File(SHELL_GAMES)}) {
             for (Game game : findGames(folder)) {
                 boolean known = false;
                 for (Game other : found) {
@@ -1103,13 +1182,17 @@ public class MainActivity extends Activity
             }
         }
         optionsSeen = presses;
-        boolean card = playing && (controller & CONTROLLER_GESTURE_BUTTONS) != 0
-                && clock < cardUntil;
+        boolean adjusting = adjustingScreen;
+        boolean card = adjusting || (playing && (controller & CONTROLLER_GESTURE_BUTTONS) != 0
+                && clock < cardUntil);
         if (card != cardShowing) {
             cardShowing = card;
             nativeShowPanel(card);
         }
-        if (card) {
+        if (adjusting) {
+            title = "The screen";
+            status = screenCard();
+        } else if (card) {
             title = "The touchpad, on this controller";
             status = controlsCard((controller & CONTROLLER_WHICH) == CONTROLLER_OWN);
         }
@@ -1118,6 +1201,135 @@ public class MainActivity extends Activity
             drawStatus(title, status);
         }
         handler.postDelayed(this::refreshStatus, card || playing ? 250 : 500);
+    }
+
+    // --- the flat screen: arranged with the pad, remembered for each game --------------------
+
+    /** Held together, these hand the pad to the screen instead of the game. */
+    private static final int ADJUST_COMBO = L1 | R1;
+    private static final long ADJUST_TICK_MILLIS = 50;
+    private static final float DISTANCE_MIN = 0.8f, DISTANCE_MAX = 8.0f;
+    private static final float WIDTH_MIN = 0.5f, WIDTH_MAX = 12.0f;
+
+    /**
+     * Looks at the pad twenty times a second: with L1 and R1 held and a flat picture on the
+     * screen, the D-pad up and down move the screen away and closer, left and right make it
+     * narrower and wider, Triangle and Cross bend it more and less, Square brings it in
+     * front of you again and Circle puts it back as it started. The game gets nothing meanwhile
+     * (sendInput), and what was set is kept for this game when the buttons are let go.
+     */
+    private final Runnable adjustTick = new Runnable() {
+        @Override
+        public void run() {
+            adjustScreen();
+            handler.postDelayed(this, ADJUST_TICK_MILLIS);
+        }
+    };
+
+    private void adjustScreen() {
+        int buttons = keyButtons | hatButtons | triggerButtons;
+        boolean combo = !choosingFov && !choosingGame && showScreen
+                && (buttons & ADJUST_COMBO) == ADJUST_COMBO && nativeScreenShown();
+        if (!combo) {
+            if (adjustingScreen) {
+                adjustingScreen = false;
+                if (screenChanged) {
+                    screenChanged = false;
+                    saveScreenProfile();
+                }
+            }
+            return;
+        }
+        adjustingScreen = true;
+        float distance = screenDistance, width = screenWidth, curve = screenCurve;
+        // A little of what it is every twentieth of a second: the same touch moves a large
+        // screen as far, in proportion, as a small one.
+        if ((buttons & UP) != 0) {
+            distance *= 1.012f;
+        }
+        if ((buttons & DOWN) != 0) {
+            distance /= 1.012f;
+        }
+        if ((buttons & RIGHT) != 0) {
+            width *= 1.012f;
+        }
+        if ((buttons & LEFT) != 0) {
+            width /= 1.012f;
+        }
+        if ((buttons & TRIANGLE) != 0) {
+            curve += 0.012f;
+        }
+        if ((buttons & CROSS) != 0) {
+            curve -= 0.012f;
+        }
+        if ((buttons & CIRCLE) != 0) {
+            distance = screenDefaults[0];
+            width = screenDefaults[1];
+            curve = screenDefaults[2];
+        }
+        long now = SystemClock.elapsedRealtime();
+        if ((buttons & SQUARE) != 0 && now - screenRecenteredAt > 700) {
+            screenRecenteredAt = now;
+            nativeScreenRecenter();
+        }
+        distance = Math.max(DISTANCE_MIN, Math.min(DISTANCE_MAX, distance));
+        width = Math.max(WIDTH_MIN, Math.min(WIDTH_MAX, width));
+        curve = Math.max(0.0f, Math.min(1.0f, curve));
+        if (distance != screenDistance || width != screenWidth || curve != screenCurve) {
+            screenDistance = distance;
+            screenWidth = width;
+            screenCurve = curve;
+            screenChanged = true;
+            nativeSetScreen(distance, width, curve);
+        }
+    }
+
+    private String screenCard() {
+        return String.format(Locale.US, "Distance %.2f m   Width %.2f m   Curve %d%%",
+                screenDistance, screenWidth, Math.round(screenCurve * 100.0f))
+                + "\nD-pad up / down: farther / closer"
+                + "\nD-pad right / left: wider / narrower"
+                + "\nTriangle / Cross: more / less curve"
+                + "\nSquare: in front of you again"
+                + "\nCircle: back to how it started"
+                + "\nHold L1 + R1 for all of this; the game gets nothing meanwhile.";
+    }
+
+    /** What this game's screen was left as, or how it starts: set before the game's first picture. */
+    private void loadScreenProfile(String serial) {
+        screenSerial = serial;
+        float distance = screenDefaults[0], width = screenDefaults[1], curve = screenDefaults[2];
+        String saved = getPreferences(MODE_PRIVATE).getString("screen_" + serial, "");
+        if (!saved.isEmpty()) {
+            try {
+                String[] parts = saved.split(",");
+                distance = Float.parseFloat(parts[0]);
+                width = Float.parseFloat(parts[1]);
+                curve = Float.parseFloat(parts[2]);
+            } catch (RuntimeException e) {
+                // Nothing the app wrote: the game starts as vrhost.txt says.
+                distance = screenDefaults[0];
+                width = screenDefaults[1];
+                curve = screenDefaults[2];
+            }
+        }
+        screenDistance = Math.max(DISTANCE_MIN, Math.min(DISTANCE_MAX, distance));
+        screenWidth = Math.max(WIDTH_MIN, Math.min(WIDTH_MAX, width));
+        screenCurve = Math.max(0.0f, Math.min(1.0f, curve));
+        nativeSetScreen(screenDistance, screenWidth, screenCurve);
+        logInfo(String.format(Locale.US, "screen for %s: %.2f m away, %.2f m wide, curve %.2f",
+                serial, screenDistance, screenWidth, screenCurve));
+    }
+
+    private void saveScreenProfile() {
+        if (screenSerial.isEmpty()) {
+            return;
+        }
+        getPreferences(MODE_PRIVATE).edit().putString("screen_" + screenSerial,
+                String.format(Locale.US, "%.3f,%.3f,%.3f", screenDistance, screenWidth,
+                        screenCurve)).apply();
+        logInfo(String.format(Locale.US, "screen for %s kept: %.2f m away, %.2f m wide, curve "
+                + "%.2f", screenSerial, screenDistance, screenWidth, screenCurve));
     }
 
     /** Which buttons do what a finger does on a DualShock 4's touchpad. */
@@ -1815,6 +2027,12 @@ public class MainActivity extends Activity
             return;
         }
         int buttons = keyButtons | hatButtons | triggerButtons | (padTouchClick ? TOUCHPAD : 0);
+        if (adjustingScreen || ((buttons & ADJUST_COMBO) == ADJUST_COMBO && nativeScreenShown())) {
+            // The player is arranging the screen with these buttons: the game is left with a
+            // pad at rest for as long as it takes.
+            nativeInput(0, 0f, 0f, 0f, 0f, 0f, 0f, false, padTouchX, padTouchY);
+            return;
+        }
         float left = leftTrigger, right = rightTrigger;
         if (!analogTriggers) {
             // Triggers that are only buttons are pulled all the way or not at all.

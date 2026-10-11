@@ -32,6 +32,16 @@
 #ifdef ENABLE_BACHATA_RUNTIME
 #include "platform/bachata/runtime_client.h"
 #endif
+#include <cstdint> // <--- Asegura que uintptr_t exista
+
+#if defined(__aarch64__) || defined(__linux__)
+extern "C" {
+    // The prebuilt FFmpeg asks for a global stack canary that glibc does not export on this
+    // target. __stack_chk_fail is NOT defined here: glibc's own aborts the process, where an
+    // empty loop would leave a smashed stack as a silent freeze.
+    uintptr_t __stack_chk_guard = 0xdeadbeefdeadbeefULL;
+}
+#endif
 
 #ifdef _WIN32
 #include <windows.h>

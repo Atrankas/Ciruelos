@@ -69,7 +69,7 @@ JNIEXPORT void JNICALL Java_com_astrobotquest_vrhost_MainActivity_nativeStartXr(
     jboolean track_hands, jint sharpen, jboolean cubic, jboolean show_stats, jfloat predict_ms,
     jint dynamic_resolution, jboolean cpu_boost, jboolean own_controllers, jint pad_hand,
     jfloat pad_tilt, jboolean rumble, jboolean stick_touchpad, jboolean show_screen,
-    jfloat screen_distance, jfloat screen_width) {
+    jfloat screen_distance, jfloat screen_width, jfloat screen_curve) {
     if (g_app) {
         return;
     }
@@ -103,6 +103,10 @@ JNIEXPORT void JNICALL Java_com_astrobotquest_vrhost_MainActivity_nativeStartXr(
     options.show_screen = show_screen == JNI_TRUE;
     options.screen_distance = screen_distance;
     options.screen_width = screen_width;
+    options.screen_curve = screen_curve;
+    g_app->xr_status.screen_distance = screen_distance;
+    g_app->xr_status.screen_width = screen_width;
+    g_app->xr_status.screen_curve = screen_curve;
     g_app->xr_thread = std::thread{[options] {
         App& app = *g_app;
         JNIEnv* thread_env = nullptr;
@@ -279,6 +283,30 @@ JNIEXPORT void JNICALL Java_com_astrobotquest_vrhost_MainActivity_nativeShowPane
                                                                                   jboolean show) {
     if (g_app) {
         g_app->xr_status.show_panel = show == JNI_TRUE;
+    }
+}
+
+/// The flat screen as the player has arranged it (metres in front, metres wide, 0 to 1 round).
+JNIEXPORT void JNICALL Java_com_astrobotquest_vrhost_MainActivity_nativeSetScreen(
+    JNIEnv*, jobject, jfloat distance, jfloat width, jfloat curve) {
+    if (g_app) {
+        g_app->xr_status.screen_distance = distance;
+        g_app->xr_status.screen_width = width;
+        g_app->xr_status.screen_curve = curve;
+    }
+}
+
+/// Whether a flat picture is on the screen at the moment.
+JNIEXPORT jboolean JNICALL Java_com_astrobotquest_vrhost_MainActivity_nativeScreenShown(JNIEnv*,
+                                                                                        jobject) {
+    return g_app && g_app->xr_status.screen_shown ? JNI_TRUE : JNI_FALSE;
+}
+
+/// Puts the screen in front of the player again, where they look now.
+JNIEXPORT void JNICALL Java_com_astrobotquest_vrhost_MainActivity_nativeScreenRecenter(JNIEnv*,
+                                                                                       jobject) {
+    if (g_app) {
+        g_app->xr_status.screen_place_requests.fetch_add(1);
     }
 }
 

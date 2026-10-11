@@ -82,7 +82,10 @@ struct XrHostOptions {
     /// Where that screen is put, in metres in front of the player, and how wide it is; its
     /// height follows from the shape of the picture itself.
     float screen_distance{2.5f};
-    float screen_width{2.2f};
+    float screen_width{3.0f};
+    /// How much the screen wraps round the player, 0 (flat) to 1 (a cylinder with the player in
+    /// its middle). Where the host can, anything above a few percent is drawn on a cylinder.
+    float screen_curve{25.0f};
 };
 
 /// What a request to reset the view asks for (bits of the counter RunXrHost is given).
@@ -102,6 +105,15 @@ struct XrHostStatus {
     /// The panel is to be shown over the game: it has something to say to who is playing.
     std::atomic<bool> show_panel{};
     std::atomic<float> refresh_rate{};
+    /// The flat screen as the player has it now (metres, metres, 0 to 1): the Java side changes
+    /// them while the player arranges the screen, the host reads them every frame.
+    std::atomic<float> screen_distance{2.5f};
+    std::atomic<float> screen_width{3.0f};
+    std::atomic<float> screen_curve{25.0f};
+    /// A flat picture is on the screen at the moment.
+    std::atomic<bool> screen_shown{};
+    /// Counts the requests to put the screen in front of the player again.
+    std::atomic<uint32_t> screen_place_requests{};
     /// Set when the startup choice is confirmed, before the game can deliver any frames.
     std::atomic<bool> reduced_fov{};
     /// Full projection tangents reported by this headset: out, in, up, down.

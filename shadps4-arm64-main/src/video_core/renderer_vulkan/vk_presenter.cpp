@@ -1142,27 +1142,12 @@ bool Presenter::WantsFlatFrames() {
     if (flat_pictures != FlatPictures::Always && seen_headset_frame) {
         return false;
     }
-    // The host is not ready for pictures yet (it has not offered its buffers): the title is left
-    // with whatever the window shows of it, rather than with nothing at all.
-    return vr_exporter->CanDeliver();
+    // No host to show it on (or one that has failed): the title is left with whatever the window
+    // shows of it, rather than with nothing at all. Where there is one, the first picture is what
+    // makes its buffers ready (see VrExporter::MayDeliver).
+    return vr_exporter->CanDeliver() || vr_exporter->MayDeliver();
 }
 
-void Presenter::TakeFlatFrame() {
-    if (pending_flat == nullptr) {
-        return;
-    }
-    Frame* const flat = pending_flat;
-    const FlatPicture picture = pending_flat_picture;
-    pending_flat = nullptr;
-    if (!IsFrameFinished(flat)) {
-        // The GPU has not finished the picture, which is what a frame of delay is for: it is
-        // dropped rather than waited for, and the next frame brings another one. (It goes on
-        // being drawn into the same host buffer either way.)
-        return;
-    }
-    // Handing the frame over waits for its tick, which IsFrameFinished has just said is done.
-    vr_exporter->DeliverFlat(flat, picture);
-}
 
 Frame* Presenter::PrepareFlatFrame(vk::ImageView picture, vk::Extent2D size,
                                    vk::CommandBuffer cmdbuf, FlatPicture& picture_rect) {
@@ -1233,8 +1218,8 @@ Frame* Presenter::PrepareFlatFrame(vk::ImageView picture, vk::Extent2D size,
     // What was drawn for the frame before this one has had a whole frame's time to be finished;
     // it is handed over at the end of this one (TakeFlatFrame), and until then the host buffer it
     // lives in is not one of the pool's, so it cannot be drawn over.
-    pending_flat = target;
-    pending_flat_picture = picture_rect;
+    next_flat = target;
+    next_flat_picture = picture_rect;
     return target;
 }
 
@@ -2031,14 +2016,10 @@ Frame* Presenter::GetRenderFrame() {
 }
 
 void Presenter::PresentHostFrame(Frame* frame) {
-    // There is no window with anything of this title's on it: the whole picture went to the VR
-    // host (see PrepareFrame). Nothing is drawn here and nothing is waited for, which is the
-    // point: the frame is the guest's only hold on the pool, and giving it back at once is what
-    // lets the title draw on instead of standing still for a picture it is not in. (The frame
-    // statistics are ended where the flip is finished, in VideoOutDriver::Flip, as for the eyes.)
     DebugState.IncFlipFrameNum();
     ReleaseFrame(frame);
 }
+
 
 void Presenter::ReleaseFrame(Frame* frame) {
     if (frame == nullptr) {
@@ -2065,4 +2046,25 @@ void Presenter::SetExpectedGameSize(s32 width, s32 height) {
     }
 }
 
+void Presenter::TakeFlatFrame() {
+    // The picture of the frame before this one is the one handed over; the picture just drawn
+    // waits for the next call (it is the frame of delay the comments here speak of).
+    Frame* const flat = pending_flat;
+    const FlatPicture picture = pending_flat_picture;
+    pending_flat = next_flat;
+    pending_flat_picture = next_flat_picture;
+    next_flat = nullptr;
+    if (flat == nullptr) {
+        return;
+    }
+    if (!IsFrameFinished(flat)) {
+        // Not finished even after a whole frame: dropped, not waited for. NOTE: it must NOT go
+        // through ReleaseFrame. `flat` is one of the host's buffers (VrExporter::Acquire), not
+        // one of the window's frames; putting it in free_queue makes the pool hand out a frame
+        // that has no fences or images of its own, and GetRenderFrame dereferences a null.
+        return;
+    }
+    // Handing the frame over waits for its tick, which IsFrameFinished has just said is done.
+    vr_exporter->DeliverFlat(flat, picture);
+}
 } // namespace Vulkan
